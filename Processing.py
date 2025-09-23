@@ -18,24 +18,28 @@ class EnhancedDataPreprocessor:
         Parameters:
         -----------
         picture_strategy : str
-            - 'zero': 누락시 0으로 설정 (기본값)
-            - 'period_avg': 해당 기간 평균으로 대체
+            - 'zero': 누락시 0으로 설정
+            - 'period_avg': 대상자 해당 기간 평균으로 대체
+            - 'missing': 측정 안됨을 별도 값(-999)으로 표시
         """
         self.picture_strategy = picture_strategy
         self.decibel_strategy = decibel_strategy
         self.lux_strategy = lux_strategy
         
         print(f"누락 데이터 처리 전략: 사진={self._get_strategy_name(picture_strategy)}, "
-              f"DECIBEL={self._get_strategy_name(decibel_strategy)}, LUX={self._get_strategy_name(lux_strategy)}")
-    
+            f"DECIBEL={self._get_strategy_name(decibel_strategy)}, LUX={self._get_strategy_name(lux_strategy)}")
+
     def _get_strategy_name(self, strategy):
         """전략 이름 변환"""
-        names = {'zero': '0으로 설정', 'period_avg': '기간 평균 대체'}
-        return names.get(strategy, strategy)
+        names = {
+            'zero': '0으로 설정', 
+            'period_avg': '기간 평균 대체',
+            'missing': '측정안됨(-999)'
+        }
+        return names.get(strategy, strategy)    
     
     def load_data(self, data_file, label_file):
-        """Step 1: 데이터 로드"""
-        print("=== Step 1: 데이터 로드 ===")
+        print("1: 데이터 로드")
         
         # 라벨 데이터 로드 (시트명이 'MZ'임)
         labels_df = pd.read_excel(label_file, sheet_name='MZ')
@@ -64,7 +68,7 @@ class EnhancedDataPreprocessor:
         clean_step_data = []
         
         for _, row in step_data.iterrows():
-            # STEP_DATE를 기본으로 사용 (YYYYMMDD 형식)
+            # STEP_DATE를 기본으로 사용 (YYYYMMDD)
             step_date = int(row['STEP_DATE'])
             
             clean_step_data.append({
@@ -73,7 +77,7 @@ class EnhancedDataPreprocessor:
                 'DAILY_STEPS': row['STEP_COUNT']
             })
         
-        print(f"정리된 STEP 데이터: {len(clean_step_data)}개 일별 레코드")
+        print(f"정리된 STEP 데이터: {len(clean_step_data)}개 일별 행")
         return clean_step_data
     
     def extract_date_from_timestamp(self, timestamp):
@@ -93,7 +97,7 @@ class EnhancedDataPreprocessor:
         
         # 사용자의 모든 활동 날짜 수집
         all_dates = set()
-        
+         
         # STEP 날짜들
         step_dates = [r['DATE'] for r in user_step_data]
         all_dates.update(step_dates)
@@ -229,18 +233,16 @@ class EnhancedDataPreprocessor:
         return all_features
     
     def extract_7day_features(self, user_id, best_period, clean_step_data, lux_data, decibel_data, picture_data):
-        """특정 7일 기간의 모든 특성 추출 (향상된 대체 전략)"""
+        """특정 7일 기간의 모든 특성 추출"""
         
         start_date = min(best_period)
         end_date = max(best_period)
         
-        # 연속된 7일 기준 날짜 생성
         base_start = datetime.strptime(str(start_date), '%Y%m%d')
         seven_days = [(base_start + timedelta(days=i)).strftime('%Y%m%d') for i in range(7)]
         seven_days = [int(date) for date in seven_days]
         
         features = {}
-        
         # 1. 걸음수 특성 (기존과 동일)
         user_step_dict = {r['DATE']: r['DAILY_STEPS'] for r in clean_step_data if r['USER_ID'] == user_id}
         period_steps = [user_step_dict[d] for d in user_step_dict.keys() if start_date <= d <= end_date]
@@ -255,76 +257,70 @@ class EnhancedDataPreprocessor:
         
         for i, steps in enumerate(daily_steps):
             features[f'day{i+1}_steps'] = steps
-        
-        # 2. LUX 특성 (향상된 대체 전략)
-        daily_lux = self._process_sensor_data_enhanced(
-            user_id, seven_days, start_date, end_date, lux_data, 'LUX_TIME', 'LUX_VALUE'
+    
+        # LUX 특성 (전략 적용)
+        daily_lux = self._process_sensor_data_with_strategy(
+            user_id, seven_days, start_date, end_date, lux_data, 'LUX_TIME', 'LUX_VALUE', self.lux_strategy
         )
         for i, lux in enumerate(daily_lux):
             features[f'day{i+1}_lux'] = lux
         
-        # 3. DECIBEL 특성 (향상된 대체 전략)
-        daily_decibel = self._process_sensor_data_enhanced(
-            user_id, seven_days, start_date, end_date, decibel_data, 'DB_TIME', 'DB_VALUE'
+        # DECIBEL 특성 (전략 적용)
+        daily_decibel = self._process_sensor_data_with_strategy(
+            user_id, seven_days, start_date, end_date, decibel_data, 'DB_TIME', 'DB_VALUE', self.decibel_strategy
         )
         for i, decibel in enumerate(daily_decibel):
             features[f'day{i+1}_decibel'] = decibel
         
-        # 4. 사진수 특성 (향상된 대체 전략)
-        daily_pictures = self._process_picture_data_enhanced(
-            user_id, seven_days, start_date, end_date, picture_data
+        # PICTURE 특성 (전략 적용)
+        daily_pictures = self._process_picture_data_with_strategy(
+            user_id, seven_days, start_date, end_date, picture_data, self.picture_strategy
         )
         for i, pic_count in enumerate(daily_pictures):
             features[f'day{i+1}_pictures'] = pic_count
         
-        # 요약 통계
-        features['avg_steps'] = np.mean(daily_steps)
-        features['std_steps'] = np.std(daily_steps)
-        features['step_consistency'] = 1 / (1 + np.std(daily_steps) / np.mean(daily_steps)) if np.mean(daily_steps) > 0 else 0
-        features['avg_lux'] = np.mean(daily_lux)
-        features['std_lux'] = np.std(daily_lux)
-        features['avg_decibel'] = np.mean(daily_decibel)
-        features['std_decibel'] = np.std(daily_decibel)
-        features['avg_pictures'] = np.mean(daily_pictures)
-        features['std_pictures'] = np.std(daily_pictures)
+        # 요약 통계 (missing 값 제외하고 계산)
+        clean_lux = [x for x in daily_lux if x != -999]
+        clean_decibel = [x for x in daily_decibel if x != -999]
+        clean_pictures = [x for x in daily_pictures if x != -999]
+        
+        features['avg_lux'] = np.mean(clean_lux) if clean_lux else 0
+        features['std_lux'] = np.std(clean_lux) if len(clean_lux) > 1 else 0
+        features['avg_decibel'] = np.mean(clean_decibel) if clean_decibel else 0
+        features['std_decibel'] = np.std(clean_decibel) if len(clean_decibel) > 1 else 0
+        features['avg_pictures'] = np.mean(clean_pictures) if clean_pictures else 0
+        features['std_pictures'] = np.std(clean_pictures) if len(clean_pictures) > 1 else 0
         
         return features
-    
-    def _process_sensor_data_enhanced(self, user_id, seven_days, start_date, end_date, sensor_data, time_col, value_col):
-        """센서 데이터 처리 (향상된 대체 전략)"""
+
+    def _process_sensor_data_with_strategy(self, user_id, seven_days, start_date, end_date, sensor_data, time_col, value_col, strategy):
+        """센서 데이터 처리 (3가지 전략 지원)"""
         if sensor_data.empty:
-            return [0] * 7
+            return [0 if strategy == 'zero' else -999 if strategy == 'missing' else 0] * 7
         
         user_sensor = sensor_data[sensor_data['USER_ID'].astype(str) == str(user_id)]
         if len(user_sensor) == 0:
-            return [0] * 7
+            return [0 if strategy == 'zero' else -999 if strategy == 'missing' else 0] * 7
         
-        # 해당 기간 내 실제 측정값들
+        # period_avg 전략을 위한 대체값 계산
         period_values = []
-        period_dates = []
         for _, row in user_sensor.iterrows():
             if pd.notna(row.get(time_col)):
                 date = self.extract_date_from_timestamp(row[time_col])
                 if date and start_date <= date <= end_date:
                     period_values.append(row[value_col])
-                    period_dates.append(date)
         
-        # 사용자 전체 측정값들
-        all_user_values = []
-        for _, row in user_sensor.iterrows():
-            if pd.notna(row.get(time_col)) and pd.notna(row.get(value_col)):
-                all_user_values.append(row[value_col])
+        period_avg_value = np.mean(period_values) if period_values else 0
         
-        # 대체값 결정
-        if len(period_dates) == 0:
-            # 기간 내 전혀 측정 안됨
-            default_value = np.mean(all_user_values) if len(all_user_values) > 0 else 0
-        elif len(period_dates) <= 2:
-            # 기간 내 측정이 2일 이하 -> 전체 평균 사용
-            default_value = np.mean(all_user_values) if len(all_user_values) > 0 else np.mean(period_values)
+        # 전략별 대체값 설정
+        if strategy == 'zero':
+            default_value = 0
+        elif strategy == 'period_avg':
+            default_value = period_avg_value
+        elif strategy == 'missing':
+            default_value = -999  # 측정 안됨을 나타내는 특수값
         else:
-            # 기간 내 측정이 3일 이상 -> 기간 평균 사용
-            default_value = np.mean(period_values)
+            default_value = 0
         
         # 일별 값 생성
         daily_values = []
@@ -342,17 +338,17 @@ class EnhancedDataPreprocessor:
                 daily_values.append(default_value)
         
         return daily_values
-    
-    def _process_picture_data_enhanced(self, user_id, seven_days, start_date, end_date, picture_data):
-        """사진 데이터 처리 (향상된 대체 전략)"""
+
+    def _process_picture_data_with_strategy(self, user_id, seven_days, start_date, end_date, picture_data, strategy):
+        """사진 데이터 처리 (3가지 전략 지원)"""
         if picture_data.empty:
-            return [0] * 7
+            return [0 if strategy == 'zero' else -999 if strategy == 'missing' else 0] * 7
         
         user_pictures = picture_data[picture_data['USER_ID'].astype(str) == str(user_id)]
         if len(user_pictures) == 0:
-            return [0] * 7
+            return [0 if strategy == 'zero' else -999 if strategy == 'missing' else 0] * 7
         
-        # 해당 기간 내 일별 사진 수
+        # period_avg 전략을 위한 계산
         period_counts = {}
         for _, row in user_pictures.iterrows():
             if pd.notna(row.get('PICTURE_DATE')):
@@ -360,210 +356,37 @@ class EnhancedDataPreprocessor:
                 if date and start_date <= date <= end_date:
                     period_counts[date] = period_counts.get(date, 0) + 1
         
-        # 사용자 전체 일별 사진 수
-        all_user_counts = {}
-        for _, row in user_pictures.iterrows():
-            if pd.notna(row.get('PICTURE_DATE')):
-                date = self.extract_date_from_timestamp(row['PICTURE_DATE'])
-                if date:
-                    all_user_counts[date] = all_user_counts.get(date, 0) + 1
+        period_avg_value = np.mean(list(period_counts.values())) if period_counts else 0
         
-        # 대체값 결정
-        if len(period_counts) == 0:
-            # 기간 내 전혀 측정 안됨
-            default_value = np.mean(list(all_user_counts.values())) if len(all_user_counts) > 0 else 0
-        elif len(period_counts) <= 2:
-            # 기간 내 측정이 2일 이하 -> 전체 평균 사용
-            default_value = np.mean(list(all_user_counts.values())) if len(all_user_counts) > 0 else np.mean(list(period_counts.values()))
+        # 전략별 대체값 설정
+        if strategy == 'zero':
+            default_value = 0
+        elif strategy == 'period_avg':
+            default_value = period_avg_value
+        elif strategy == 'missing':
+            default_value = -999
         else:
-            # 기간 내 측정이 3일 이상 -> 기간 평균 사용
-            default_value = np.mean(list(period_counts.values()))
+            default_value = 0
         
         # 일별 값 생성
         daily_pictures = []
         for day in seven_days:
             day_picture_count = 0
-            for _, row in user_pictures.iterrows():
-                if pd.notna(row.get('PICTURE_DATE')):
-                    date = self.extract_date_from_timestamp(row['PICTURE_DATE'])
-                    if date == day:
-                        day_picture_count += 1
-            
-            if day_picture_count > 0 or self._has_picture_data_on_day(user_pictures, day):
-                daily_pictures.append(day_picture_count)  # 측정됨 (0개든 5개든)
-            else:
-                daily_pictures.append(default_value)  # 측정 안됨, 대체값 사용
-        
-        return daily_pictures
-    
-    def _has_picture_data_on_day(self, user_pictures, day):
-        """해당 날짜에 사진 측정 시도가 있었는지 확인"""
-        for _, row in user_pictures.iterrows():
-            if pd.notna(row.get('PICTURE_DATE')):
-                date = self.extract_date_from_timestamp(row['PICTURE_DATE'])
-                if date == day:
-                    return True
-        return False
-    
-    def _process_sensor_data_with_flags(self, user_id, seven_days, start_date, end_date, sensor_data, time_col, value_col, strategy):
-        """센서 데이터 처리 (측정 여부 플래그 반환)"""
-        if sensor_data.empty:
-            return [(0, 0) for _ in range(7)]  # (값, 측정여부)
-        
-        user_sensor = sensor_data[sensor_data['USER_ID'].astype(str) == str(user_id)]
-        if len(user_sensor) == 0:
-            return [(0, 0) for _ in range(7)]
-        
-        # 전략별 대체값 계산
-        if strategy == 'zero':
-            default_value = 0
-        elif strategy == 'period_avg':
-            period_values = []
-            for _, row in user_sensor.iterrows():
-                if pd.notna(row.get(time_col)):
-                    date = self.extract_date_from_timestamp(row[time_col])
-                    if date and start_date <= date <= end_date:
-                        period_values.append(row[value_col])
-            default_value = np.mean(period_values) if period_values else 0
-        else:
-            default_value = 0
-        
-        daily_values_and_flags = []
-        for day in seven_days:
-            day_values = []
-            for _, row in user_sensor.iterrows():
-                if pd.notna(row.get(time_col)):
-                    date = self.extract_date_from_timestamp(row[time_col])
-                    if date == day:
-                        day_values.append(row[value_col])
-            
-            if day_values:
-                daily_values_and_flags.append((np.mean(day_values), 1))  # 측정됨
-            else:
-                daily_values_and_flags.append((default_value, 0))  # 측정 안됨
-        
-        return daily_values_and_flags
-    
-    def _process_picture_data_with_flags(self, user_id, seven_days, start_date, end_date, picture_data, strategy):
-        """사진 데이터 처리 (측정 여부 플래그 반환)"""
-        if picture_data.empty:
-            return [(0, 0) for _ in range(7)]
-        
-        user_pictures = picture_data[picture_data['USER_ID'].astype(str) == str(user_id)]
-        if len(user_pictures) == 0:
-            return [(0, 0) for _ in range(7)]
-        
-        # 전략별 대체값 계산
-        if strategy == 'zero':
-            default_value = 0
-        elif strategy == 'period_avg':
-            period_counts = {}
-            for _, row in user_pictures.iterrows():
-                if pd.notna(row.get('PICTURE_DATE')):
-                    date = self.extract_date_from_timestamp(row['PICTURE_DATE'])
-                    if date and start_date <= date <= end_date:
-                        period_counts[date] = period_counts.get(date, 0) + 1
-            default_value = np.mean(list(period_counts.values())) if period_counts else 0
-        else:
-            default_value = 0
-        
-        daily_pictures_and_flags = []
-        for day in seven_days:
-            day_picture_count = 0
-            has_any_data = False
+            has_data = False
             
             for _, row in user_pictures.iterrows():
                 if pd.notna(row.get('PICTURE_DATE')):
                     date = self.extract_date_from_timestamp(row['PICTURE_DATE'])
                     if date == day:
                         day_picture_count += 1
-                        has_any_data = True
+                        has_data = True
             
-            if has_any_data:
-                daily_pictures_and_flags.append((day_picture_count, 1))  # 측정됨 (0개든 5개든)
-            else:
-                daily_pictures_and_flags.append((default_value, 0))  # 측정 안됨
-        
-        return daily_pictures_and_flags
-    
-    def _process_sensor_data(self, user_id, seven_days, start_date, end_date, sensor_data, time_col, value_col, strategy):
-        """센서 데이터 처리"""
-        if sensor_data.empty:
-            return [0] * 7
-        
-        user_sensor = sensor_data[sensor_data['USER_ID'].astype(str) == str(user_id)]
-        if len(user_sensor) == 0:
-            return [0] * 7
-        
-        # 전략별 대체값 계산
-        if strategy == 'zero':
-            default_value = 0
-        elif strategy == 'period_avg':
-            period_values = []
-            for _, row in user_sensor.iterrows():
-                if pd.notna(row.get(time_col)):
-                    date = self.extract_date_from_timestamp(row[time_col])
-                    if date and start_date <= date <= end_date:
-                        period_values.append(row[value_col])
-            default_value = np.mean(period_values) if period_values else 0
-        else:
-            default_value = 0
-        
-        daily_values = []
-        for day in seven_days:
-            day_values = []
-            for _, row in user_sensor.iterrows():
-                if pd.notna(row.get(time_col)):
-                    date = self.extract_date_from_timestamp(row[time_col])
-                    if date == day:
-                        day_values.append(row[value_col])
-            
-            if day_values:
-                daily_values.append(np.mean(day_values))
-            else:
-                daily_values.append(default_value)
-        
-        return daily_values
-    
-    def _process_picture_data(self, user_id, seven_days, start_date, end_date, picture_data, strategy):
-        """사진 데이터 처리"""
-        if picture_data.empty:
-            return [0] * 7
-        
-        user_pictures = picture_data[picture_data['USER_ID'].astype(str) == str(user_id)]
-        if len(user_pictures) == 0:
-            return [0] * 7
-        
-        # 전략별 대체값 계산
-        if strategy == 'zero':
-            default_value = 0
-        elif strategy == 'period_avg':
-            period_counts = {}
-            for _, row in user_pictures.iterrows():
-                if pd.notna(row.get('PICTURE_DATE')):
-                    date = self.extract_date_from_timestamp(row['PICTURE_DATE'])
-                    if date and start_date <= date <= end_date:
-                        period_counts[date] = period_counts.get(date, 0) + 1
-            default_value = np.mean(list(period_counts.values())) if period_counts else 0
-        else:
-            default_value = 0
-        
-        daily_pictures = []
-        for day in seven_days:
-            day_picture_count = 0
-            for _, row in user_pictures.iterrows():
-                if pd.notna(row.get('PICTURE_DATE')):
-                    date = self.extract_date_from_timestamp(row['PICTURE_DATE'])
-                    if date == day:
-                        day_picture_count += 1
-            
-            if day_picture_count > 0:
+            if has_data:
                 daily_pictures.append(day_picture_count)
             else:
                 daily_pictures.append(default_value)
         
         return daily_pictures
-    
     def create_medical_features(self, join_survey_data, all_user_ids):
         """Step 4: 의료/상담/치료 특성 생성 (단순화)"""
         print("\n=== Step 4: 의료/상담/치료 특성 생성 ===")
@@ -924,20 +747,24 @@ if __name__ == "__main__":
     
     # 설정 1: 사진은 0, 나머지는 기간 평균 (기본)
     #print("=== 설정 1: 기본 (사진=0, 센서=기간평균) ===")
-    runner1 = PipelineRunner(picture_strategy='period_avg', decibel_strategy='zero', lux_strategy='zero') #0.757 (±0.114)
+    runner1 = PipelineRunner(picture_strategy='period_avg', decibel_strategy='period_avg', lux_strategy='period_avg') #0.757 (±0.114)
     
     # 설정 2: 모든 변수를 기간 평균으로 대체
     #print("\n=== 설정 2: 모든 변수 기간평균 대체 ===")
     #runner2 = PipelineRunner(picture_strategy='period_avg', decibel_strategy='period_avg', lux_strategy='period_avg')# 5-fold CV 평균: 0.743 (±0.146)
     runner2 = PipelineRunner(picture_strategy='zero', decibel_strategy='zero', lux_strategy='zero') #5-fold CV 평균: 0.786 (±0.090)
-    
+    runner_missing = PipelineRunner(
+    picture_strategy='missing', 
+    decibel_strategy='missing', 
+    lux_strategy='missing'
+    )
     # 파일 경로 설정
     data_file = r"C:\Users\parkm\OneDrive - dgu.ac.kr\AI_LAB\U-health\lifelog\Lifelog\data\231123-DATA.xlsx"
     label_file = r"C:\Users\parkm\OneDrive - dgu.ac.kr\AI_LAB\U-health\lifelog\Lifelog\data\231123-LABEL.xlsx"
     
     try:
         # 원하는 설정 선택해서 실행
-        model, feature_importance, X, y, user_ids = runner2.run_pipeline(data_file, label_file)
+        model, feature_importance, X, y, user_ids = runner1.run_pipeline(data_file, label_file)
         
         if model is not None:
             print(f"\n성공적으로 완료되었습니다!")
